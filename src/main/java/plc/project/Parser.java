@@ -234,11 +234,13 @@ public class Parser {
 
     // Match based on token type
     private boolean matchType(Token.Type... types) {
-        for (Token.Type type : types) {
-            if (check(type)) {
+        int i = 0;
+        while (i < types.length) {
+            if (check(types[i])) {
                 advance();
                 return true;
             }
+            i++;
         }
         return false;
     }
@@ -291,3 +293,4 @@ public class Parser {
         return new ParseException(message, token.getIndex());
     }
 }
+
