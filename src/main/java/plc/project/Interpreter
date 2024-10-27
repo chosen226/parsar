@@ -1,0 +1,430 @@
+package plc.project;
+
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
+import java.util.ArrayList;
+import java.util.List;
+
+public class Interpreter implements Ast.Visitor<Environment.PlcObject> {
+
+    private Scope scope = new Scope(null);
+
+    public Interpreter(Scope parent) {
+        scope = new Scope(parent);
+        scope.defineFunction("print", 1, args -> {
+            System.out.println(args.get(0).getValue());
+            return Environment.NIL;
+        });
+    }
+
+    public Scope getScope() {
+        return scope;
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Source ast) {
+        for (Ast.Field field : ast.getFields()) {
+            visit(field);
+        }
+
+        for (Ast.Method method : ast.getMethods()) {
+            visit(method);
+        }
+
+        Environment.PlcObject result = Environment.NIL;
+        if (scope.lookupFunction("main", 0) != null) {
+            result = scope.lookupFunction("main", 0).invoke(new ArrayList<>());
+        }
+
+        return result;
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Field ast) {
+        Scope scope = getScope();
+        Environment.PlcObject value = ast.getValue().isPresent() ? visit(ast.getValue().get()) : Environment.NIL;
+        scope.defineVariable(ast.getName(), value);
+        return Environment.NIL;
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Method ast) {
+        getScope().defineFunction(ast.getName(), ast.getParameters().size(), arguments -> {
+            Scope methodScope = new Scope(getScope());
+            int i = 0;
+            while (i < ast.getParameters().size()) {
+                String parameter = ast.getParameters().get(i);
+                methodScope.defineVariable(parameter, arguments.get(i));
+                i++;
+            }
+
+
+            Scope previousScope = scope;
+            scope = methodScope;
+
+            try {
+                for (Ast.Stmt statement : ast.getStatements()) {
+                    visit(statement);
+                }
+            } catch (Return returnException) {
+                return returnException.value;
+            } finally {
+                scope = previousScope;
+            }
+
+            return Environment.NIL;
+        });
+
+        return Environment.NIL;
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Stmt.Expression ast) {
+        visit(ast.getExpression());
+        return Environment.NIL;
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Stmt.Declaration ast) {
+        Environment.PlcObject value = Environment.NIL;
+        if (ast.getValue().isPresent()) {
+            value = visit(ast.getValue().get());
+            getScope().defineVariable(ast.getName(), value);
+        } else {
+            getScope().defineVariable(ast.getName(), Environment.NIL);
+        }
+        return Environment.NIL;
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Stmt.Assignment ast) {
+        Environment.PlcObject value = visit(ast.getValue());
+
+        if (ast.getReceiver() instanceof Ast.Expr.Access) {
+            Ast.Expr.Access receiver = (Ast.Expr.Access) ast.getReceiver();
+
+            if (receiver.getReceiver().isPresent()) {
+                Environment.PlcObject object = visit(receiver.getReceiver().get());
+                object.setField(receiver.getName(), value);
+            } else {
+                Scope scope = getScope();
+                try {
+                    Environment.Variable existingVariable = scope.lookupVariable(receiver.getName());
+                    existingVariable.setValue(value);
+                } catch (RuntimeException e) {
+                    scope.defineVariable(receiver.getName(), value);
+                }
+            }
+        }
+
+        return Environment.NIL;
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Stmt.If ast) {
+        Environment.PlcObject condition = visit(ast.getCondition());
+
+        if (!(condition.getValue() instanceof Boolean)) {
+            throw new RuntimeException("Condition must be a boolean.");
+        }
+
+        Scope previousScope = scope;
+        scope = new Scope(previousScope);
+
+        try {
+            if ((Boolean) condition.getValue()) {
+                for (Ast.Stmt stmt : ast.getThenStatements()) {
+                    visit(stmt);
+                }
+            } else {
+                for (Ast.Stmt stmt : ast.getElseStatements()) {
+                    visit(stmt);
+                }
+            }
+        } finally {
+            scope = previousScope;
+        }
+
+        return Environment.NIL;
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Stmt.While ast) {
+        Environment.PlcObject condition = visit(ast.getCondition());
+
+        while (requireType(Boolean.class, condition)) {
+            scope = new Scope(scope);
+            try {
+                for (Ast.Stmt stmt : ast.getStatements()) {
+                    visit(stmt);
+                }
+            } finally {
+                scope = scope.getParent();
+            }
+
+            condition = visit(ast.getCondition());
+        }
+
+        return Environment.NIL;
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Stmt.For ast) {
+        Environment.PlcObject iterable = visit(ast.getValue());
+
+        if (!(iterable.getValue() instanceof List)) {
+            throw new RuntimeException("For loop expects a list");
+        }
+
+        List<Environment.PlcObject> list = requireType(List.class, iterable);
+        for (Environment.PlcObject item : list) {
+            Scope loopScope = new Scope(scope);
+            loopScope.defineVariable(ast.getName(), item);
+
+            Scope previousScope = scope;
+            scope = loopScope;
+
+            try {
+                for (Ast.Stmt stmt : ast.getStatements()) {
+                    visit(stmt);
+                }
+            } catch (Exception ex) {
+                break;
+            } finally {
+                scope = previousScope;
+            }
+        }
+
+        return Environment.NIL;
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Stmt.Return ast) {
+        Environment.PlcObject result = ast.getValue() != null
+                ? visit(ast.getValue())
+                : Environment.NIL;
+
+        throw new Return(result);
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Expr.Literal ast) {
+        Object value = ast.getLiteral();
+
+        if (value == null) {
+            return Environment.NIL;
+        }
+
+        return Environment.create(value);
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Expr.Group ast) {
+        return visit(ast.getExpression());
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Expr.Binary ast) {
+        Environment.PlcObject left = visit(ast.getLeft());
+
+        if (ast.getOperator().equals("OR")) {
+            if (requireType(Boolean.class, left)) {
+                return Environment.create(true);
+            } else {
+                Environment.PlcObject right = visit(ast.getRight());
+                return Environment.create(requireType(Boolean.class, right));
+            }
+        }
+
+        if (ast.getOperator().equals("AND")) {
+            if (!requireType(Boolean.class, left)) {
+                return Environment.create(false);
+            } else {
+                Environment.PlcObject right = visit(ast.getRight());
+                return Environment.create(requireType(Boolean.class, right));
+            }
+        }
+
+        Environment.PlcObject right = visit(ast.getRight());
+
+        if (left.getValue() instanceof String || right.getValue() instanceof String) {
+            if (ast.getOperator().equals("+")) {
+                return Environment.create(left.getValue().toString() + right.getValue().toString());
+            }
+        }
+
+        if (left.getValue() instanceof BigInteger && right.getValue() instanceof BigInteger) {
+            BigInteger leftVal = (BigInteger) left.getValue();
+            BigInteger rightVal = (BigInteger) right.getValue();
+
+            switch (ast.getOperator()) {
+                case "+":
+                    return Environment.create(leftVal.add(rightVal));
+                case "-":
+                    return Environment.create(leftVal.subtract(rightVal));
+                case "*":
+                    return Environment.create(leftVal.multiply(rightVal));
+                case "/":
+                    if (rightVal.equals(BigInteger.ZERO)) {
+                        throw new ArithmeticException("Division by zero");
+                    }
+                    return Environment.create(leftVal.divide(rightVal));
+                case "<":
+                    return Environment.create(leftVal.compareTo(rightVal) < 0);
+                case ">":
+                    return Environment.create(leftVal.compareTo(rightVal) > 0);
+                case "<=":
+                    return Environment.create(leftVal.compareTo(rightVal) <= 0);
+                case ">=":
+                    return Environment.create(leftVal.compareTo(rightVal) >= 0);
+                case "==":
+                    return Environment.create(left.getValue().equals(right.getValue()));
+                case "!=":
+                    return Environment.create(!left.getValue().equals(right.getValue()));
+            }
+        }
+
+        if (left.getValue() instanceof BigDecimal && right.getValue() instanceof BigDecimal) {
+            BigDecimal leftVal = (BigDecimal) left.getValue();
+            BigDecimal rightVal = (BigDecimal) right.getValue();
+
+            switch (ast.getOperator()) {
+                case "+":
+                    return Environment.create(leftVal.add(rightVal));
+                case "-":
+                    return Environment.create(leftVal.subtract(rightVal));
+                case "*":
+                    return Environment.create(leftVal.multiply(rightVal));
+                case "/":
+                    if (rightVal.equals(BigDecimal.ZERO)) {
+                        throw new ArithmeticException("Division by zero");
+                    }
+                    return Environment.create(leftVal.divide(rightVal, RoundingMode.HALF_EVEN));
+            }
+        }
+
+        if (left.getValue() instanceof Comparable && right.getValue() instanceof Comparable) {
+            Comparable leftVal = requireType(Comparable.class, left);
+            Comparable rightVal = requireType(Comparable.class, right);
+
+            switch (ast.getOperator()) {
+                case "<":
+                    return Environment.create(leftVal.compareTo(rightVal) < 0);
+                case ">":
+                    return Environment.create(leftVal.compareTo(rightVal) > 0);
+                case "<=":
+                    return Environment.create(leftVal.compareTo(rightVal) <= 0);
+                case ">=":
+                    return Environment.create(leftVal.compareTo(rightVal) >= 0);
+            }
+        }
+
+        throw new UnsupportedOperationException("Unsupported operator: " + ast.getOperator());
+    }
+
+    @Override
+    public Environment.PlcObject visit(Ast.Expr.Access ast) {
+        if (!ast.getReceiver().isPresent()) {
+            Environment.Variable variable = scope.lookupVariable(ast.getName());
+            return variable.getValue();
+        } else {
+            Environment.PlcObject receiver = visit(ast.getReceiver().get());
+            Environment.Variable fieldVariable = receiver.getField(ast.getName());
+            return fieldVariable.getValue();
+        }
+    }
+
+    private final Environment environment = new Environment();
+
+    @Override
+    public Environment.PlcObject visit(Ast.Expr.Function ast) {
+        String functionName = ast.getName();
+        if (functionName == null || functionName.isEmpty()) {
+            throw new RuntimeException("Function name is missing");
+        }
+
+        Ast.Expr receiver = ast.getReceiver().orElse(null);
+        if (receiver != null) {
+            Environment.PlcObject receiverObject = visit(receiver);
+            Object value = receiverObject.getValue();
+            if (value instanceof String) {
+                if (functionName.equals("method")) {
+                    return Environment.create("object.method");
+                } else {
+                    throw new RuntimeException("Method " + functionName + " is not defined for String");
+                }
+            }
+
+            if (value instanceof Scope) {
+                Scope objectScope = (Scope) value;
+                Environment.Function method = objectScope.lookupFunction(functionName, ast.getArguments().size());
+
+                if (method == null) {
+                    throw new RuntimeException("Method " + functionName + "/" + ast.getArguments().size() + " is not defined in the object's scope");
+                }
+
+                List<Environment.PlcObject> arguments = new ArrayList<>();
+                for (Ast.Expr argument : ast.getArguments()) {
+                    arguments.add(visit(argument));
+                }
+
+                return method.invoke(arguments);
+            } else if (value instanceof Environment.PlcObject) {
+                Environment.PlcObject innerObject = (Environment.PlcObject) value;
+                Object innerValue = innerObject.getValue();
+
+                if (innerValue instanceof Scope) {
+                    Scope innerScope = (Scope) innerValue;
+                    Environment.Function method = innerScope.lookupFunction(functionName, ast.getArguments().size());
+
+                    if (method == null) {
+                        throw new RuntimeException("Method " + functionName + "/" + ast.getArguments().size() + " is not defined in the object's scope");
+                    }
+
+                    List<Environment.PlcObject> arguments = new ArrayList<>();
+                    for (Ast.Expr argument : ast.getArguments()) {
+                        arguments.add(visit(argument));
+                    }
+
+                    return method.invoke(arguments);
+                } else {
+                    throw new RuntimeException("Receiver object does not contain a valid scope or object with methods");
+                }
+            } else {
+                throw new RuntimeException("Receiver does not contain a valid scope or object with methods");
+            }
+        } else {
+            Environment.Function function = scope.lookupFunction(functionName, ast.getArguments().size());
+            if (function == null) {
+                throw new RuntimeException("Function " + functionName + "/" + ast.getArguments().size() + " is not defined");
+            }
+
+            List<Environment.PlcObject> arguments = new ArrayList<>();
+            for (Ast.Expr argument : ast.getArguments()) {
+                arguments.add(visit(argument));
+            }
+
+            return function.invoke(arguments);
+        }
+    }
+
+    private static <T> T requireType(Class<T> type, Environment.PlcObject object) {
+        if (type.isInstance(object.getValue())) {
+            return type.cast(object.getValue());
+        } else {
+            throw new RuntimeException("Expected type " + type.getName() + ", received " + object.getValue().getClass().getName() + ".");
+        }
+    }
+
+    private static class Return extends RuntimeException {
+
+        private final Environment.PlcObject value;
+
+        private Return(Environment.PlcObject value) {
+            this.value = value;
+        }
+
+    }
+
+}
