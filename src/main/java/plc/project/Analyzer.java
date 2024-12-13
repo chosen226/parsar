@@ -39,10 +39,26 @@ public final class Analyzer implements Ast.Visitor<Environment.Type> {
         }
         return null;
     }
-
     @Override
     public Environment.Type visit(Ast.Field ast) {
-        throw new UnsupportedOperationException();
+        Environment.Type type;
+        try {
+            type = Environment.getType(ast.getTypeName());
+        } catch (RuntimeException e) {
+            throw new RuntimeException("Unknown type specified for field: " + ast.getTypeName());
+        }
+
+        if (ast.getValue().isPresent()) {
+            Environment.Type valueType = visit(ast.getValue().get());
+            requireAssignable(type, valueType);
+        }
+
+        Environment.Variable variable = scope.defineVariable(
+                ast.getName(), ast.getName(), type, Environment.NIL
+        );
+        ast.setVariable(variable);
+
+        return null;
     }
 
     @Override
@@ -139,14 +155,33 @@ public final class Analyzer implements Ast.Visitor<Environment.Type> {
 
     @Override
     public Environment.Type visit(Ast.Stmt.For ast) {
-        throw new UnsupportedOperationException();
+        Environment.Type iterableType = visit(ast.getValue());
+        if (!iterableType.equals(Environment.Type.INTEGER_ITERABLE)) {
+            throw new RuntimeException("The value of a for loop must be an integer iterable.");
+        }
+        Scope originalScope = scope;
+        scope = new Scope(scope);
+        scope.defineVariable(ast.getName(), ast.getName(), Environment.Type.INTEGER, Environment.NIL);
+        for (Ast.Stmt statement : ast.getStatements()) {
+            visit(statement);
+        }
+        scope = originalScope;
+        return null;
     }
-
     @Override
     public Environment.Type visit(Ast.Stmt.While ast) {
-        throw new UnsupportedOperationException();
+        Environment.Type conditionType = visit(ast.getCondition());
+        if (!conditionType.equals(Environment.Type.BOOLEAN)) {
+            throw new RuntimeException("The condition of a while loop must be a boolean.");
+        }
+        Scope originalScope = scope;
+        scope = new Scope(scope);
+        for (Ast.Stmt statement : ast.getStatements()) {
+            visit(statement);
+        }
+        scope = originalScope;
+        return null;
     }
-
     @Override
     public Environment.Type visit(Ast.Stmt.Return ast) {
         // Ensure that the method context is available
@@ -197,7 +232,9 @@ public final class Analyzer implements Ast.Visitor<Environment.Type> {
 
     @Override
     public Environment.Type visit(Ast.Expr.Group ast) {
-        throw new UnsupportedOperationException();
+        Environment.Type innerType = visit(ast.getExpression());
+        ast.setType(innerType);
+        return innerType;
     }
 
     @Override
