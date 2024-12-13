@@ -316,17 +316,31 @@ public final class Generator implements Ast.Visitor<Void> {
 
     @Override
     public Void visit(Ast.Expr.Binary ast) {
-        visit(ast.getLeft());
+        visit(ast.getLeft()); // Visit the left operand
 
-        String operator;
-        switch (ast.getOperator()) {
-            case "AND": operator = "&&"; break;
-            case "OR": operator = "||"; break;
-            default: operator = ast.getOperator(); break;
+        // Handle string concatenation separately
+        if (ast.getOperator().equals("+") &&
+                (ast.getLeft().getType() == Environment.Type.STRING ||
+                        ast.getRight().getType() == Environment.Type.STRING)) {
+            print(" + "); // Use + for string concatenation
+        } else {
+            // Map other operators to their Java equivalents
+            String operator;
+            switch (ast.getOperator()) {
+                case "AND":
+                    operator = "&&";
+                    break;
+                case "OR":
+                    operator = "||";
+                    break;
+                default:
+                    operator = ast.getOperator();
+                    break;
+            }
+            print(" ", operator, " "); // Print operator with spaces
         }
 
-        print(" ", operator, " ");
-        visit(ast.getRight());
+        visit(ast.getRight()); // Visit the right operand
         return null;
     }
 
