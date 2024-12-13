@@ -1,5 +1,6 @@
 package plc.project;
 
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -57,12 +58,15 @@ public final class Analyzer implements Ast.Visitor<Environment.Type> {
         ast.setFunction(function);
         Scope originalScope = scope;
         scope = new Scope(scope);
+        Ast.Method previousMethod = this.method;
+        this.method = ast;
         for (int i = 0; i < ast.getParameters().size(); i++) {
             scope.defineVariable(ast.getParameters().get(i), ast.getParameters().get(i), parameterTypes.get(i), Environment.NIL);
         }
         for (Ast.Stmt statement : ast.getStatements()) {
             visit(statement);
         }
+        this.method = previousMethod;
         scope = originalScope;
         return null;
     }
@@ -145,7 +149,19 @@ public final class Analyzer implements Ast.Visitor<Environment.Type> {
 
     @Override
     public Environment.Type visit(Ast.Stmt.Return ast) {
-        throw new UnsupportedOperationException();
+        // Ensure that the method context is available
+        if (method == null) {
+            throw new RuntimeException("Return statement must be inside a method.");
+        }
+
+        // Get the expected return type of the method
+        Environment.Type returnType = method.getFunction().getReturnType();
+
+        // Validate the return value's type
+        Environment.Type valueType = visit(ast.getValue());
+        requireAssignable(returnType, valueType);
+
+        return null;
     }
 
     @Override
@@ -172,7 +188,11 @@ public final class Analyzer implements Ast.Visitor<Environment.Type> {
             ast.setType(Environment.Type.STRING);
             return Environment.Type.STRING;
         }
-        throw new RuntimeException("Unsupported literal type.");
+        else if (ast.getLiteral() instanceof BigDecimal) {  // Add this case
+            ast.setType(Environment.Type.DECIMAL);
+            return Environment.Type.DECIMAL;
+        }
+            throw new RuntimeException("Unsupported literal type.");
     }
 
     @Override
